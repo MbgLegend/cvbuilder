@@ -12,7 +12,7 @@ if (
     process.env.STRIPE_PRO_PLAN_PRICE_ID === undefined ||
     process.env.STRIPE_CREDIT_PRICE_ID === undefined
 ) {
-    throw new Errror(`
+    throw new Error(`
         STRIPE_SECRET_KEY || 
         STRIPE_WEBHOOK_SECRET || 
         STRIPE_PRO_PLAN_PRICE_ID || 
@@ -23,12 +23,16 @@ if (
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
 
 export async function POST(req) {
-    const payload = await req.text()
+    // Get raw body as buffer for Stripe signature verification
+    const buf = await req.arrayBuffer()
+    const payload = Buffer.from(buf)
+
     const sig = req.headers.get("Stripe-Signature")
 
     if (!sig) {
         return NextResponse.json({ status: "failed", error: "Missing Stripe signature" }, { status: 400 })
     }
+
     let event
     try {
         event = stripe.webhooks.constructEvent(payload, sig, process.env.STRIPE_WEBHOOK_SECRET)
@@ -41,9 +45,8 @@ export async function POST(req) {
     }
 
     const session = event?.data.object
-    // check if session exists
     if (!session) {
-        return NextResponse.json({ status: "failed", error: "Invalid session data" }, { status: 400 });
+        return NextResponse.json({ status: "failed", error: "Invalid session data" }, { status: 400 })
     }
 
     const email = session.customer_email
@@ -57,13 +60,11 @@ export async function POST(req) {
     try {
         await connectToDB()
 
-        // Check if this session has already been processed (Prevents duplicate processing)
         const existingUser = await User.findOne({ email }).lean()
         if (!existingUser) {
             return NextResponse.json({ status: "failed", error: "User not found" }, { status: 404 })
         }
 
-        // ✅ Fetch purchased items safely
         const lineItems = await stripe.checkout.sessions.listLineItems(sessionId)
         if (!lineItems?.data || lineItems.data.length === 0) {
             return NextResponse.json({ status: "failed", error: "No items found in the session" }, { status: 400 })
@@ -75,11 +76,9 @@ export async function POST(req) {
                 if (existingUser.plan === "pro") {
                     return NextResponse.json({ status: "failed", error: "User already has Pro plan" }, { status: 400 })
                 }
-                // update user plan to pro
                 await User.findOneAndUpdate({ email }, { plan: "pro" })
-                // Send Pro plan confirmation email
                 await transporter.sendMail({
-                    from: `"CV builder <noreply@cvbuilder.monster>`,
+                    from: `"CV builder <noreply@cvbuilder.monster>"`,
                     to: email,
                     subject: "Welcome to CV Builder Pro 🎉",
                     html: premium(name)
@@ -98,23 +97,24 @@ export async function POST(req) {
 
                     console.log(`✅ User ${email} purchased ${quantity} credits. Total credits: ${updatedCredits}`)
 
-                    // Send Credits purchase confirmation email
                     await transporter.sendMail({
-                        from: `"CV Builder" <noreply@cvbuilder.monster>`,
+                        from: `"CV Builder" <noreply@cvbuilder.monster>"`,
                         to: email,
                         subject: "CV Builder Credits Purchased 🎉",
                         html: credits(product, quantity, price, (lineItems?.data?.[0]?.amount_total / 100), name),
                     })
                 } catch (error) {
-                    console.log("❌ Unable to retrive quantity: ", error.message)
+                    console.log("❌ Unable to retrieve quantity: ", error.message)
                 }
                 break
+
             default:
-                console.log(`❌ Unknown product purchased: ${purchasedPriceId}`);
+                console.log(`❌ Unknown product purchased: ${purchasedPriceId}`)
                 return NextResponse.json({ status: "failed", error: "Unknown product purchased" }, { status: 400 })
         }
+
         return NextResponse.json({ status: "success", event: event.type })
     } catch (error) {
-        return NextResponse.json({ status: "failed", error })
+        return NextResponse.json({ status: "failed", error: error.message || error })
     }
 }
